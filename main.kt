@@ -1,220 +1,131 @@
-package com.appnajeet.user.ui.profile
+package com.appnajeet.user.ui.home
 
-import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.View
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
-import androidx.recyclerview.widget.LinearLayoutManager
+import com.appnajeet.user.BaseActivity
 import com.appnajeet.user.R
-import com.appnajeet.user.data.model.MyTournament
-import com.appnajeet.user.databinding.FragmentMyTournamentsBinding
-import com.appnajeet.user.ui.tournament.MyTournamentAdapter
-import com.appnajeet.user.ui.tournament.TournamentDetailActivity
+import com.appnajeet.user.ui.leaderboard.LeaderboardFragment
+import com.appnajeet.user.ui.profile.ProfileFragment
+import com.appnajeet.user.ui.transactions.TransactionsFragment
+import com.appnajeet.user.utils.DisplayUtils
+import com.google.android.material.bottomnavigation.BottomNavigationView
+import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
+import com.google.firebase.database.FirebaseDatabase
+import com.appnajeet.user.ads.RewardedAdManager
+import com.appnajeet.user.ui.common.AnnouncementDialog
 
-class MyTournamentsFragment : Fragment(R.layout.fragment_my_tournaments) {
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.ViewCompat
 
-    private lateinit var binding: FragmentMyTournamentsBinding
-    private val list = mutableListOf<MyTournament>()
-    private lateinit var adapter: MyTournamentAdapter
-    private val db = FirebaseDatabase.getInstance().reference
+class MainActivity : BaseActivity() {
 
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        super.onViewCreated(view, savedInstanceState)
-        binding = FragmentMyTournamentsBinding.bind(view)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
-        setupRecyclerView()
-        loadMyTournaments()
-    }
-
-    private fun setupRecyclerView() {
-        // 🔥 FIX 1: Correct constructor - only one parameter
-        adapter = MyTournamentAdapter(list)
-
-        // 🔥 Set click listener separately
-        adapter.setOnItemClickListener { tournament ->
-            openTournamentDetails(tournament)
+        // 🔥 CRITICAL FIX #1: Force set navigation bar color to match bottom nav
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            window.navigationBarColor = ContextCompat.getColor(this, R.color.background_secondary)
+            window.statusBarColor = ContextCompat.getColor(this, R.color.background_primary)
         }
 
-        binding.recyclerMyTournaments.layoutManager = LinearLayoutManager(requireContext())
-        binding.recyclerMyTournaments.adapter = adapter
-    }
+        // 🔥 CRITICAL FIX #2: System bars ke saath properly handle
+        WindowCompat.setDecorFitsSystemWindows(window, true)
 
-    private fun openTournamentDetails(tournament: MyTournament) {
-        // 🔥 FIX 2: Add Intent import
-        val intent = Intent(requireContext(), TournamentDetailActivity::class.java)
-        intent.putExtra("tournamentId", tournament.tournamentId)
-        startActivity(intent)
-    }
+        setContentView(R.layout.activity_main)
 
-    private fun loadMyTournaments() {
-        val uid = FirebaseAuth.getInstance().currentUser?.uid ?: run {
-            binding.progressBar.visibility = View.GONE
-            binding.txtEmpty.visibility = View.VISIBLE
-            binding.txtEmpty.text = "Please login to view your tournaments"
-            return
+        // 🆕 Purane users ke liye gems node auto-create
+        initGemsNodeIfMissing()
+
+        // 🔥 FIX NEW USER: App start hote hi ad preload karo
+        if (!RewardedAdManager.isAdReady() && !RewardedAdManager.isLoading()) {
+            RewardedAdManager.load(this)
         }
 
-        // Show loading
-        binding.progressBar.visibility = View.VISIBLE
-        binding.txtEmpty.visibility = View.GONE
+        // 🆕 Announcement popup — Firebase se
+        AnnouncementDialog.checkAndShow(this)
 
-        // Load from user_tournaments node
-        loadFromUserTournaments(uid)
+        val bottomNav = findViewById<BottomNavigationView>(R.id.bottom_navigation_view)
+        val fab = findViewById<FloatingActionButton>(R.id.fab)
+        val fragmentContainer = findViewById<View>(R.id.fragment_container)
+
+        // 🔥 Apply window insets for notch/gesture navigation
+        applyWindowInsets(fragmentContainer, bottomNav)
+
+        // Optional: Debug bottom nav (remove after testing)
+        // BottomNavDebug.debugBottomNav(bottomNav)
+
+        // ✅ Default fragment
+        if (savedInstanceState == null) {
+            loadFragment(HomeFragment())
+            bottomNav.selectedItemId = R.id.nav_home
+        }
+
+        // ✅ Bottom Navigation click
+        bottomNav.setOnItemSelectedListener { item ->
+            when (item.itemId) {
+                R.id.nav_home         -> { loadFragment(HomeFragment());        true }
+                R.id.nav_leaderboard  -> { loadFragment(LeaderboardFragment()); true }
+                R.id.nav_transactions -> { loadFragment(TransactionsFragment()); true }
+                R.id.nav_profile      -> { loadFragment(ProfileFragment());     true }
+                else -> false
+            }
+        }
+
+        // ✅ FAB (ADS) - Center
+        fab.setOnClickListener {
+            loadFragment(AdsFragment())
+        }
     }
 
-    private fun loadFromUserTournaments(uid: String) {
-        Log.d("MyTournaments", "Loading from user_tournaments for UID: $uid")
+    private fun initGemsNodeIfMissing() {
+        val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return
+        val gemsRef = FirebaseDatabase.getInstance()
+            .getReference("users")
+            .child(uid)
+            .child("gems")
 
-        db.child("user_tournaments").child(uid)
-            .addListenerForSingleValueEvent(object : ValueEventListener {
-                override fun onDataChange(snapshot: DataSnapshot) {
-                    list.clear()
-
-                    if (!snapshot.exists()) {
-                        Log.d("MyTournaments", "No data in user_tournaments")
-                        loadFromParticipants(uid)
-                        return
-                    }
-
-                    // 🔥 FIX 3: Proper count handling
-                    val totalChildren = snapshot.childrenCount
-                    var loadedCount = 0
-
-                    for (tournamentSnap in snapshot.children) {
-                        val tournamentId = tournamentSnap.key ?: continue
-
-                        val status = tournamentSnap.child("status").getValue(String::class.java) ?: "JOINED"
-                        val name = tournamentSnap.child("name").getValue(String::class.java) ?: "Unknown Tournament"
-                        val dateTime = tournamentSnap.child("dateTime").getValue(String::class.java) ?: ""
-                        val game = tournamentSnap.child("game").getValue(String::class.java) ?: ""
-                        val type = tournamentSnap.child("type").getValue(String::class.java) ?: ""
-
-                        list.add(
-                            MyTournament(
-                                tournamentId = tournamentId,
-                                name = name,
-                                status = status,
-                                dateTime = dateTime,
-                                game = game,
-                                type = type
-                            )
-                        )
-                        loadedCount++
-
-                        // Update UI when all are loaded
-                        if (loadedCount.toLong() == totalChildren) {
-                            updateUI()
+        gemsRef.get()
+            .addOnSuccessListener { snapshot ->
+                if (!snapshot.exists()) {
+                    gemsRef.setValue(0)
+                        .addOnSuccessListener {
+                            Log.d("MainActivity", "✅ gems:0 created for uid=$uid")
                         }
-                    }
-
-                    if (totalChildren == 0L) {
-                        updateUI()
-                    }
-                }
-
-                override fun onCancelled(error: DatabaseError) {
-                    Log.e("MyTournaments", "Error: ${error.message}")
-                    loadFromParticipants(uid)
-                }
-            })
-    }
-
-    private fun loadFromParticipants(uid: String) {
-        Log.d("MyTournaments", "Loading from tournamentParticipants for UID: $uid")
-
-        db.child("tournamentParticipants")
-            .addListenerForSingleValueEvent(object : ValueEventListener {
-                override fun onDataChange(snapshot: DataSnapshot) {
-                    list.clear()
-
-                    val tournamentIds = mutableListOf<String>()
-
-                    // Find all tournaments where user is a participant
-                    for (tournamentSnap in snapshot.children) {
-                        val tournamentId = tournamentSnap.key ?: continue
-
-                        // Check if user is in this tournament
-                        if (tournamentSnap.child(uid).exists()) {
-                            tournamentIds.add(tournamentId)
-                        } else {
-                            // Check in team members if any
-                            var isTeamMember = false
-                            for (participantSnap in tournamentSnap.children) {
-                                if (participantSnap.child("members").child(uid).exists()) {
-                                    isTeamMember = true
-                                    break
-                                }
-                            }
-                            if (isTeamMember) {
-                                tournamentIds.add(tournamentId)
-                            }
+                        .addOnFailureListener { e ->
+                            Log.e("MainActivity", "❌ gems init failed: ${e.message}")
                         }
-                    }
-
-                    if (tournamentIds.isEmpty()) {
-                        updateUI()
-                        return
-                    }
-
-                    // Fetch details for each tournament
-                    var loadedCount = 0
-                    for (tournamentId in tournamentIds) {
-                        db.child("tournaments").child(tournamentId).get()
-                            .addOnSuccessListener { tournamentDetails ->
-                                val name = tournamentDetails.child("name").getValue(String::class.java) ?: "Unknown Tournament"
-                                val status = tournamentDetails.child("status").getValue(String::class.java) ?: "UPCOMING"
-                                val dateTime = tournamentDetails.child("dateTime").getValue(String::class.java) ?: ""
-                                val game = tournamentDetails.child("game").getValue(String::class.java) ?: ""
-                                val type = tournamentDetails.child("type").getValue(String::class.java) ?: ""
-
-                                list.add(
-                                    MyTournament(
-                                        tournamentId = tournamentId,
-                                        name = name,
-                                        status = status,
-                                        dateTime = dateTime,
-                                        game = game,
-                                        type = type
-                                    )
-                                )
-                                loadedCount++
-
-                                if (loadedCount == tournamentIds.size) {
-                                    updateUI()
-                                }
-                            }
-                            .addOnFailureListener {
-                                loadedCount++
-                                if (loadedCount == tournamentIds.size) {
-                                    updateUI()
-                                }
-                            }
-                    }
+                } else {
+                    Log.d("MainActivity", "✅ gems already exists: ${snapshot.value}")
                 }
-
-                override fun onCancelled(error: DatabaseError) {
-                    Log.e("MyTournaments", "Error in participants: ${error.message}")
-                    binding.progressBar.visibility = View.GONE
-                    binding.txtEmpty.visibility = View.VISIBLE
-                    binding.txtEmpty.text = "Failed to load tournaments"
-                }
-            })
+            }
+            .addOnFailureListener { e ->
+                Log.e("MainActivity", "❌ gems check failed: ${e.message}")
+            }
     }
 
-    private fun updateUI() {
-        binding.progressBar.visibility = View.GONE
-
-        if (list.isEmpty()) {
-            binding.txtEmpty.visibility = View.VISIBLE
-            binding.txtEmpty.text = "No tournaments joined yet"
-            binding.recyclerMyTournaments.visibility = View.GONE
-        } else {
-            binding.txtEmpty.visibility = View.GONE
-            binding.recyclerMyTournaments.visibility = View.VISIBLE
-            adapter.notifyDataSetChanged()
+    private fun applyWindowInsets(
+        fragmentContainer: View,
+        bottomNav: BottomNavigationView
+    ) {
+        DisplayUtils.applyWindowInsets(fragmentContainer) { left: Int, top: Int, right: Int, bottom: Int ->
+            fragmentContainer.setPadding(left, top, right, 0)
         }
+
+        DisplayUtils.applyWindowInsets(bottomNav) { left: Int, top: Int, right: Int, bottom: Int ->
+            bottomNav.setPadding(left, 0, right, 0)
+        }
+    }
+
+    private fun loadFragment(fragment: Fragment) {
+        supportFragmentManager.beginTransaction()
+            .setCustomAnimations(R.anim.fade_in, R.anim.fade_out)
+            .replace(R.id.fragment_container, fragment)
+            .commit()
     }
 }

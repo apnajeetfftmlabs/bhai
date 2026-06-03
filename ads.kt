@@ -37,6 +37,7 @@ class AdsFragment : Fragment() {
     private var isWaitingForAd = false
     private var retryCount = 0
     private val MAX_RETRY = 3
+    private var rewardEarned = false  // 🔥 NEW
 
     private var coinsListener: ValueEventListener? = null
     private var adsListener: ValueEventListener? = null
@@ -48,7 +49,6 @@ class AdsFragment : Fragment() {
 
     private val TAG = "AdsFragment"
 
-    // 🔥 Back press callback reference
     private var backPressedCallback: OnBackPressedCallback? = null
 
     override fun onCreateView(
@@ -71,14 +71,11 @@ class AdsFragment : Fragment() {
         setupClickListeners()
         checkAdState()
 
-        // 🔥 FIX NEW USER: Agar ad ready nahi hai toh immediately force load karo
-        // Naye user ke case mein RewardedAdManager kabhi load nahi hua hoga
         if (!RewardedAdManager.isAdReady() && !RewardedAdManager.isLoading()) {
             Log.d(TAG, "Fragment opened — forcing ad preload")
             RewardedAdManager.load(requireContext(), force = true)
         }
 
-        // 🔥 Setup back press handling
         setupBackPressHandler()
     }
 
@@ -104,44 +101,33 @@ class AdsFragment : Fragment() {
         }
     }
 
-    // 🔥 Listen for ad show state changes from manager
     private fun setupAdShowStateListener() {
         RewardedAdManager.setOnAdShowStateChangedListener { isShowing ->
-            // 🔥 FIX: Direct set WITHOUT handler.post delay
-            // handler.post se async delay hoti thi — back press purana value check karta tha
             isAdShowing = isShowing
             Log.d(TAG, "Ad show state changed: isShowing = $isShowing")
         }
     }
 
-    // 🔥 FINAL FIXED: Back press handler
     private fun setupBackPressHandler() {
         backPressedCallback = object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                // 🔥 Check ALL possible states
                 val adCurrentlyShowing = isAdShowing || RewardedAdManager.isShowing()
 
                 Log.d(TAG, "Back pressed - States: isAdShowing=$isAdShowing, managerShowing=${RewardedAdManager.isShowing()}, isLoadingAd=$isLoadingAd, isWaitingForAd=$isWaitingForAd")
 
                 when {
-                    // Case 1: Ad is currently showing - BLOCK back press
-                    // 🔥 FIX: isAdShowing OR manager.isShowing() — dono check
                     adCurrentlyShowing -> {
                         Log.d(TAG, "🚫 Back press BLOCKED - ad is showing")
-                        // Silent block — koi toast nahi (annoying lagta hai)
                     }
 
-                    // Case 2: Ad is loading or waiting - BLOCK back press
                     isLoadingAd || isWaitingForAd -> {
                         Log.d(TAG, "🚫 Back press BLOCKED - ad is loading/waiting")
                         showToast("Please wait, ad is loading...")
                     }
 
-                    // Case 3: No ad activity - ALLOW back press
                     else -> {
                         Log.d(TAG, "✅ Back press ALLOWED - cleaning up")
                         cleanupBeforeExit()
-                        // Remove callback before allowing back
                         this.isEnabled = false
                         requireActivity().onBackPressed()
                     }
@@ -149,7 +135,6 @@ class AdsFragment : Fragment() {
             }
         }
 
-        // Add the callback to the dispatcher
         requireActivity().onBackPressedDispatcher.addCallback(
             viewLifecycleOwner,
             backPressedCallback!!
@@ -159,7 +144,6 @@ class AdsFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         Log.d(TAG, "onResume - checking ad state")
-        // 🔥 Sync state with manager
         isAdShowing = RewardedAdManager.isShowing()
         checkAdState()
     }
@@ -177,7 +161,6 @@ class AdsFragment : Fragment() {
         removeFirebaseListeners()
         resetState()
 
-        // 🔥 Remove back press callback
         backPressedCallback?.remove()
         backPressedCallback = null
 
@@ -206,6 +189,7 @@ class AdsFragment : Fragment() {
         wasAdReady = false
         isWaitingForAd = false
         retryCount = 0
+        rewardEarned = false  // 🔥 NEW
     }
 
     private fun setupClickListeners() {
@@ -409,7 +393,6 @@ class AdsFragment : Fragment() {
                 override fun onDataChange(s: DataSnapshot) {
                     if (!isAdded) return
                     try {
-                        // 🔥 FIX: Firebase Long → toLong() safely
                         val coins = s.getValue(Long::class.java)
                             ?: s.getValue(Int::class.java)?.toLong()
                             ?: 0L
@@ -538,7 +521,7 @@ class AdsFragment : Fragment() {
                         isWaitingForAd = false
                         retryCount = 0
                         showAdImmediately(uid, today)
-                    } else if (waitTime < 10000) {  // 🔥 Increased to 10 seconds
+                    } else if (waitTime < 10000) {
                         handler.postDelayed(this, 500)
                     } else {
                         Log.d(TAG, "Ad wait timeout")
@@ -571,11 +554,11 @@ class AdsFragment : Fragment() {
             val adsRef = db.child("user_ads").child(uid).child(today)
             val coinsRef = db.child("users").child(uid).child("coins")
 
-            // 🔥 IMPORTANT: Set isAdShowing = true BEFORE showing ad
             isAdShowing = true
             isLoadingAd = false
             isWaitingForAd = false
             retryCount = 0
+            rewardEarned = false  // 🔥 NEW - reset before every ad
 
             Log.d(TAG, "🎬 Showing ad, isAdShowing = $isAdShowing")
 
@@ -583,10 +566,14 @@ class AdsFragment : Fragment() {
                 activity = requireActivity(),
                 onReward = { amount, type ->
                     Log.d(TAG, "Earned $amount $type")
+                    rewardEarned = true  // 🔥 NEW - user ne poora ad dekha
                     processReward(uid, today, adsRef, coinsRef)
                 },
                 onClosed = {
                     Log.d(TAG, "Ad closed callback received")
+                    if (!rewardEarned) {  // 🔥 NEW - early exit check
+                        showEarlyExitDialog()
+                    }
                     handleAdClosed()
                 },
                 onFailed = { errorMessage ->
@@ -599,6 +586,17 @@ class AdsFragment : Fragment() {
             Log.e(TAG, "Show ad error", e)
             handleAdFailed("Failed to show ad")
         }
+    }
+
+    // 🔥 NEW FUNCTION
+    private fun showEarlyExitDialog() {
+        if (!isAdded) return
+        AlertDialog.Builder(requireContext())
+            .setTitle("Reward Nahi Mila ❌")
+            .setMessage("Poora ad dekho tabhi coin milega.")
+            .setPositiveButton("OK") { d, _ -> d.dismiss() }
+            .setCancelable(false)
+            .show()
     }
 
     private fun handleAdClosed() {
@@ -638,9 +636,6 @@ class AdsFragment : Fragment() {
         coinsRef: DatabaseReference
     ) {
         try {
-            // 🔥 FIX: Dono transactions alag alag the — agar coin transaction fail ho toh
-            //          ad count increment ho jaata tha (ad waste!)
-            //          Ab ServerValue.increment() se atomic updateChildren — ek saath dono
             val db = FirebaseDatabase.getInstance().reference
             val updates = hashMapOf<String, Any>(
                 "user_ads/$uid/$today"    to ServerValue.increment(1),
@@ -837,7 +832,7 @@ class AdsFragment : Fragment() {
                 }
 
                 createWithdrawRequest(uid, amount)
-                addTransaction(uid, -amount, "Withdraw Request", "WITHDRAW")  // 🔥 FIX: was "ENTRY"
+                addTransaction(uid, -amount, "Withdraw Request", "WITHDRAW")
                 dialog.dismiss()
                 showToast("Withdraw request submitted ✅")
             }
